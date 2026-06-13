@@ -15,8 +15,9 @@ from db import (
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OLLAMA_URL = os.getenv("OLLAMA_URL")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+OPENAI_URL = os.getenv("OPENAI_URL", "https://api.openai.com/v1/chat/completions")
 
 
 def _load_info_files() -> str:
@@ -297,13 +298,11 @@ TOOLS = [
 
 
 async def estimate_nutrition(description: str) -> dict | None:
-    """Ask Ollama to estimate macros for a food description. Returns {calories, protein_g, carbs_g, fat_g}."""
+    """Ask OpenAI to estimate macros for a food description. Returns {calories, protein_g, carbs_g, fat_g}."""
     payload = {
-        "model": OLLAMA_MODEL,
-        "stream": False,
-        "think": False,
-        "format": "json",
-        "options": {"num_predict": 256, "temperature": 0},
+        "model": OPENAI_MODEL,
+        "temperature": 0,
+        "max_tokens": 200,
         "messages": [
             {
                 "role": "system",
@@ -316,15 +315,38 @@ async def estimate_nutrition(description: str) -> dict | None:
             },
             {"role": "user", "content": f"Estimate the nutrition for: {description}"},
         ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "nutrition_estimate",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "calories": {"type": "number"},
+                        "protein_g": {"type": "number"},
+                        "carbs_g": {"type": "number"},
+                        "fat_g": {"type": "number"},
+                    },
+                    "required": ["calories", "protein_g", "carbs_g", "fat_g"],
+                    "additionalProperties": False,
+                },
+            },
+        },
     }
     try:
         timeout = aiohttp.ClientTimeout(connect=10, total=60)
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        }
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(OLLAMA_URL, json=payload) as resp:
+            async with session.post(OPENAI_URL, headers=headers, json=payload) as resp:
                 if resp.status != 200:
                     return None
                 data = await resp.json()
-                return json.loads(data["message"]["content"])
+                content = data["choices"][0]["message"].get("content") or ""
+                return json.loads(content)
     except Exception:
         return None
 
@@ -364,7 +386,7 @@ def format_profile_context(discord_id: str) -> str | None:
     return "\n".join(lines)
 
 
-async def ask_ollama(user_message: str, author_name: str, history: list | None = None, profile_context: str | None = None) -> str:
+async def ask_openai(user_message: str, author_name: str, history: list | None = None, profile_context: str | None = None) -> str:
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": f"Current date and time: {datetime.now().strftime('%A, %d %B %Y, %H:%M')}. Use this as the timestamp for any SITREPs you generate."},
@@ -374,30 +396,33 @@ async def ask_ollama(user_message: str, author_name: str, history: list | None =
     ]
 
     timeout = aiohttp.ClientTimeout(connect=10, total=None)
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for _ in range(6):  # max tool-call iterations before giving up
             payload = {
-                "model": OLLAMA_MODEL,
-                "stream": False,
-                "think": False,
+                "model": OPENAI_MODEL,
                 "tools": TOOLS,
-                "options": {"num_predict": 1024, "repeat_penalty": 1.2},
+                "tool_choice": "auto",
                 "messages": messages,
-                "keep_alive": "30m",
+                "temperature": 0.7,
+                "max_tokens": 1200,
             }
 
-            async with session.post(OLLAMA_URL, json=payload) as resp:
+            async with session.post(OPENAI_URL, headers=headers, json=payload) as resp:
                 if resp.status != 200:
                     text = await resp.text()
-                    return f"⚠️ AGENT inference node returned HTTP {resp.status}:\n```{text[:1000]}```"
+                    return f"⚠️ AGENT command uplink returned HTTP {resp.status}:\n```{text[:1000]}```"
 
                 data = await resp.json()
-                msg = data["message"]
+                msg = data["choices"][0]["message"]
                 tool_calls = msg.get("tool_calls") or []
 
                 if not tool_calls:
-                    content = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.DOTALL).strip()
+                    content = (msg.get("content") or "").strip()
                     return content or "⚠️ Command telemetry incomplete. No response generated."
 
                 # Append assistant turn with tool calls, then resolve each one
@@ -410,7 +435,7 @@ async def ask_ollama(user_message: str, author_name: str, history: list | None =
                         result = safe_calc(args.get("expression", ""))
                     else:
                         result = f"Unknown tool: {fn_name}"
-                    messages.append({"role": "tool", "content": result})
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
     return "⚠️ Command telemetry incomplete. Tool resolution loop exhausted."
 
@@ -694,9 +719,9 @@ async def on_message(message: discord.Message):
 
     async with message.channel.typing():
         try:
-            reply = await ask_ollama(prompt, message.author.display_name, history, profile_context)
+            reply = await ask_openai(prompt, message.author.display_name, history, profile_context)
         except Exception as e:
-            print(f"ask_ollama error: {e}")
+            print(f"ask_openai error: {e}")
             await message.reply("🔴 **METCOM SYSTEMS FAILURE** — Inference node unreachable. AGENT is experiencing technical difficulties. Command telemetry offline. Stand by.")
             return
 
@@ -708,5 +733,9 @@ async def on_message(message: discord.Message):
     for chunk in chunks[1:]:
         await message.channel.send(chunk)
 
+if not DISCORD_TOKEN:
+    raise RuntimeError("Missing DISCORD_TOKEN in environment.")
+if not OPENAI_API_KEY:
+    raise RuntimeError("Missing OPENAI_API_KEY in environment.")
 
 client.run(DISCORD_TOKEN)
