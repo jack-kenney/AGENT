@@ -18,6 +18,9 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 OPENAI_URL = os.getenv("OPENAI_URL", "https://api.openai.com/v1/chat/completions")
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "1200"))
+OPENAI_CONTINUE_MAX_ROUNDS = int(os.getenv("OPENAI_CONTINUE_MAX_ROUNDS", "3"))
+DISCORD_MESSAGE_LIMIT = int(os.getenv("DISCORD_MESSAGE_LIMIT", "1900"))
 
 
 def _load_info_files() -> str:
@@ -400,16 +403,18 @@ async def ask_openai(user_message: str, author_name: str, history: list | None =
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
+    accumulated_parts: list[str] = []
+    continuation_rounds = 0
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        for _ in range(6):  # max tool-call iterations before giving up
+        for _ in range(10):  # max tool-call/continuation iterations before giving up
             payload = {
                 "model": OPENAI_MODEL,
                 "tools": TOOLS,
                 "tool_choice": "auto",
                 "messages": messages,
                 "temperature": 0.7,
-                "max_tokens": 1200,
+                "max_tokens": OPENAI_MAX_TOKENS,
             }
 
             async with session.post(OPENAI_URL, headers=headers, json=payload) as resp:
@@ -418,12 +423,32 @@ async def ask_openai(user_message: str, author_name: str, history: list | None =
                     return f"⚠️ AGENT command uplink returned HTTP {resp.status}:\n```{text[:1000]}```"
 
                 data = await resp.json()
-                msg = data["choices"][0]["message"]
+                choice = data["choices"][0]
+                msg = choice["message"]
+                finish_reason = choice.get("finish_reason")
                 tool_calls = msg.get("tool_calls") or []
 
                 if not tool_calls:
                     content = (msg.get("content") or "").strip()
-                    return content or "⚠️ Command telemetry incomplete. No response generated."
+                    if content:
+                        accumulated_parts.append(content)
+                    messages.append({"role": "assistant", "content": msg.get("content") or ""})
+
+                    if finish_reason == "length" and continuation_rounds < OPENAI_CONTINUE_MAX_ROUNDS:
+                        continuation_rounds += 1
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Continue exactly from where you stopped. "
+                                    "Do not repeat prior text; finish the same response."
+                                ),
+                            }
+                        )
+                        continue
+
+                    full_content = "\n\n".join(part for part in accumulated_parts if part).strip()
+                    return full_content or "⚠️ Command telemetry incomplete. No response generated."
 
                 # Append assistant turn with tool calls, then resolve each one
                 messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls})
@@ -440,16 +465,32 @@ async def ask_openai(user_message: str, author_name: str, history: list | None =
     return "⚠️ Command telemetry incomplete. Tool resolution loop exhausted."
 
 
-def split_reply(text: str, limit: int = 1900) -> list[str]:
-    chunks = []
-    while len(text) > limit:
-        split_at = text.rfind("\n", 0, limit)
-        if split_at == -1:
+def split_reply(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
+    remaining = text.strip()
+    if not remaining:
+        return ["⚠️ Command telemetry incomplete. No response generated."]
+
+    chunks: list[str] = []
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+
+        split_at = remaining.rfind("\n\n", 0, limit)
+        if split_at < limit // 2:
+            split_at = remaining.rfind("\n", 0, limit)
+        if split_at < limit // 2:
+            split_at = remaining.rfind(" ", 0, limit)
+        if split_at < limit // 2:
             split_at = limit
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    if text:
-        chunks.append(text)
+
+        chunk = remaining[:split_at].rstrip()
+        if not chunk:
+            chunk = remaining[:limit]
+
+        chunks.append(chunk)
+        remaining = remaining[split_at:].lstrip()
+
     return chunks
 
 
