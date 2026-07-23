@@ -2,6 +2,8 @@ import json
 import math
 import os
 import re
+import io
+import base64
 import aiohttp
 import discord
 from collections import defaultdict, deque
@@ -19,6 +21,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_RESPONSES_URL = os.getenv("OPENAI_RESPONSES_URL", f"{OPENAI_BASE_URL}/responses")
+OPENAI_IMAGES_URL = os.getenv("OPENAI_IMAGES_URL", f"{OPENAI_BASE_URL}/images/generations")
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
 OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "1200"))
 OPENAI_CONTINUE_MAX_ROUNDS = int(os.getenv("OPENAI_CONTINUE_MAX_ROUNDS", "3"))
 DISCORD_MESSAGE_LIMIT = int(os.getenv("DISCORD_MESSAGE_LIMIT", "1900"))
@@ -718,6 +722,63 @@ async def handle_intake(message: discord.Message) -> None:
     await message.reply("\n".join(lines))
 
 
+async def generate_image(prompt: str) -> bytes | None:
+    payload = {
+        "model": OPENAI_IMAGE_MODEL,
+        "prompt": prompt,
+        "size": "1024x1024",
+        "quality": "medium",
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    timeout = aiohttp.ClientTimeout(connect=10, total=600)
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(OPENAI_IMAGES_URL, headers=headers, json=payload) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                item = (data.get("data") or [{}])[0]
+                b64 = item.get("b64_json")
+                if b64:
+                    return base64.b64decode(b64)
+                img_url = item.get("url")
+                if not img_url:
+                    return None
+                async with session.get(img_url) as img_resp:
+                    if img_resp.status != 200:
+                        return None
+                    return await img_resp.read()
+    except Exception:
+        return None
+
+
+async def handle_image(message: discord.Message) -> None:
+    raw = message.content.strip()[len("!image"):].strip()
+    if not raw:
+        await message.reply("⚠️ Usage: `!image \"prompt goes here\"`")
+        return
+
+    prompt = raw
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        prompt = raw[1:-1].strip()
+    if not prompt:
+        await message.reply("⚠️ Usage: `!image \"prompt goes here\"`")
+        return
+
+    async with message.channel.typing():
+        image_bytes = await generate_image(prompt)
+    if not image_bytes:
+        await message.reply("⚠️ Image generation failed.")
+        return
+
+    file_obj = discord.File(io.BytesIO(image_bytes), filename="agent-image.png")
+    await message.channel.send(file=file_obj)
+
+
 async def handle_help(message: discord.Message) -> None:
     lines = [
         "🧠 **METCOM COMMAND INTERFACE — AVAILABLE DIRECTIVES**", "",
@@ -732,6 +793,8 @@ async def handle_help(message: discord.Message) -> None:
         "`!log <food description>` — Log a food item (macros estimated automatically)",
         "`!log <description> | <calories> <protein> <carbs> <fat>` — Log with explicit macros",
         "  Example: `!log chicken breast 200g | 220 41 0 5`", "",
+        "**Image Generation**",
+        "`!image \"prompt goes here\"` — Generate a 1024x1024 medium-quality image with GPT Image 2", "",
         "**Daily Intake**",
         "`!intake` — View today's full intake report with totals vs. targets",
         "`!intake clear` — Wipe today's log", "",
@@ -786,6 +849,9 @@ async def on_message(message: discord.Message):
         return
     if content.startswith("!intake"):
         await handle_intake(message)
+        return
+    if content.startswith("!image"):
+        await handle_image(message)
         return
 
     if not should_respond(message):
