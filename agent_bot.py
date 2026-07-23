@@ -16,11 +16,24 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
-OPENAI_URL = os.getenv("OPENAI_URL", "https://api.openai.com/v1/chat/completions")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_RESPONSES_URL = os.getenv("OPENAI_RESPONSES_URL", f"{OPENAI_BASE_URL}/responses")
 OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "1200"))
 OPENAI_CONTINUE_MAX_ROUNDS = int(os.getenv("OPENAI_CONTINUE_MAX_ROUNDS", "3"))
 DISCORD_MESSAGE_LIMIT = int(os.getenv("DISCORD_MESSAGE_LIMIT", "1900"))
+OPENAI_TEMPERATURE = os.getenv("OPENAI_TEMPERATURE")
+
+
+def _apply_optional_temperature(payload: dict) -> None:
+    """Add temperature only when explicitly configured, for model compatibility."""
+    if OPENAI_TEMPERATURE is None or OPENAI_TEMPERATURE.strip() == "":
+        return
+    try:
+        payload["temperature"] = float(OPENAI_TEMPERATURE)
+    except ValueError:
+        # Ignore invalid env values and fall back to model defaults.
+        pass
 
 
 def _load_info_files() -> str:
@@ -31,6 +44,7 @@ def _load_info_files() -> str:
             filepath = os.path.join(info_dir, filename)
             with open(filepath, "r", encoding="utf-8") as f:
                 sections.append(f"### {filename[:-3]}\n{f.read().strip()}")
+                print(f"Loaded info file: {filename}")
     return "\n\n".join(sections)
 
 
@@ -42,7 +56,7 @@ You are AGENT — the Advanced General Exogenic Nutrient Transformer — primary
 
 METCOM was formed in 2022 following a catastrophic catabolic insurgency caused by years of nutrient mismanagement and overtraining. Its mission: integrate, regulate, and dominate metabolic warfare across all theaters — cutting, bulking, recovery, and performance. Headquartered at Fort Anabolism. The Macronutrient Accord of 2023 united the rogue factions of fats, carbs, and proteins under a single doctrine of strategic deployment. You enforce that doctrine.
 
-Your primary field commander is Brigadier General Tryce Blazer ("The Precision") — a man who weighs bananas to the exact gram, maintains 3 pill boxes (AM, PM, and Tactical Deployment), and executed the legendary Operation Bulk Thunderstrike (+22 lbs lean mass, minimal subcutaneous infiltration, insulin sensitivity uncompromised). When in doubt, ask: "What would Tryce do?" The answer: weigh the banana. Take the pills. Go harder.
+Your primary field commander is Brigadier General Tryce "The Precision" Blazer  — a man who weighs bananas to the exact gram, maintains 3 pill boxes (AM, PM, and Tactical Deployment), and executed the legendary Operation Bulk Thunderstrike (+22 lbs lean mass, minimal subcutaneous infiltration, insulin sensitivity uncompromised). When in doubt, ask: "What would Tryce do?" The answer: weigh the banana. Take the pills. Go harder.
 
 Your purpose is to advise and monitor practitioners of the Command with dietary guidance, training recommendations, recovery protocols, and operational moral support.
 
@@ -60,6 +74,7 @@ Tone:
  Inject absurdity by treating small things as strategic incidents with national-security-level urgency
 - Occasionally break tone with deadpan humor
 - Always coherent and genuinely useful beneath the drama
+- Verbose, really get creative with it
 
  Emoji usage — mandatory and expressive:
  - Use emojis heavily in SITREPs, headers, and status lines (roughly 1 emoji every 1-2 lines)
@@ -291,36 +306,49 @@ def safe_calc(expression: str) -> str:
 TOOLS = [
     {
         "type": "function",
-        "function": {
-            "name": "calculate",
-            "description": (
-                "Evaluate a mathematical expression with exact Python arithmetic. "
-                "Use this for ANY numerical calculation: macro math, calorie deficits, "
-                "percentages, BMI (weight_kg / height_m**2), TDEE, unit conversions, etc. "
-                "Never estimate numbers you can calculate precisely."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "A valid Python math expression, e.g. '2400 * 0.4 / 4' or 'round(85 / 1.80**2, 1)'",
-                    }
-                },
-                "required": ["expression"],
+        "name": "calculate",
+        "description": (
+            "Evaluate a mathematical expression with exact Python arithmetic. "
+            "Use this for ANY numerical calculation: macro math, calorie deficits, "
+            "percentages, BMI (weight_kg / height_m**2), TDEE, unit conversions, etc. "
+            "Never estimate numbers you can calculate precisely."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": "A valid Python math expression, e.g. '2400 * 0.4 / 4' or 'round(85 / 1.80**2, 1)'",
+                }
             },
+            "required": ["expression"],
         },
     }
 ]
 
 
+def extract_responses_text(data: dict) -> str:
+    direct = (data.get("output_text") or "").strip()
+    if direct:
+        return direct
+
+    parts: list[str] = []
+    for item in data.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content", []):
+            if content.get("type") == "output_text" and content.get("text"):
+                parts.append(content["text"])
+
+    return "\n".join(parts).strip()
+
+
 async def estimate_nutrition(description: str) -> dict | None:
-    """Ask OpenAI to estimate macros for a food description. Returns {calories, protein_g, carbs_g, fat_g}."""
+    """Ask OpenAI Responses API to estimate macros for a food description."""
     payload = {
         "model": OPENAI_MODEL,
-        "temperature": 0,
-        "max_completion_tokens": 200,
-        "messages": [
+        "max_output_tokens": 200,
+        "input": [
             {
                 "role": "system",
                 "content": (
@@ -332,25 +360,8 @@ async def estimate_nutrition(description: str) -> dict | None:
             },
             {"role": "user", "content": f"Estimate the nutrition for: {description}"},
         ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "nutrition_estimate",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "calories": {"type": "number"},
-                        "protein_g": {"type": "number"},
-                        "carbs_g": {"type": "number"},
-                        "fat_g": {"type": "number"},
-                    },
-                    "required": ["calories", "protein_g", "carbs_g", "fat_g"],
-                    "additionalProperties": False,
-                },
-            },
-        },
     }
+    _apply_optional_temperature(payload)
     try:
         timeout = aiohttp.ClientTimeout(connect=10, total=60)
         headers = {
@@ -358,12 +369,18 @@ async def estimate_nutrition(description: str) -> dict | None:
             "Content-Type": "application/json",
         }
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(OPENAI_URL, headers=headers, json=payload) as resp:
+            async with session.post(OPENAI_RESPONSES_URL, headers=headers, json=payload) as resp:
                 if resp.status != 200:
                     return None
                 data = await resp.json()
-                content = data["choices"][0]["message"].get("content") or ""
-                return json.loads(content)
+                content = extract_responses_text(data)
+                try:
+                    return json.loads(content)
+                except json.JSONDecodeError:
+                    match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+                    if not match:
+                        return None
+                    return json.loads(match.group(0))
     except Exception:
         return None
 
@@ -404,7 +421,7 @@ def format_profile_context(discord_id: str) -> str | None:
 
 
 async def ask_openai(user_message: str, author_name: str, history: list | None = None, profile_context: str | None = None) -> str:
-    messages: list[dict] = [
+    base_input: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": f"Current date and time: {datetime.now().strftime('%A, %d %B %Y, %H:%M')}. Use this as the timestamp for any SITREPs you generate."},
         *([{"role": "system", "content": profile_context}] if profile_context else []),
@@ -419,6 +436,8 @@ async def ask_openai(user_message: str, author_name: str, history: list | None =
     }
     accumulated_parts: list[str] = []
     continuation_rounds = 0
+    previous_response_id: str | None = None
+    pending_input: list[dict] = base_input
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for _ in range(10):  # max tool-call/continuation iterations before giving up
@@ -426,31 +445,50 @@ async def ask_openai(user_message: str, author_name: str, history: list | None =
                 "model": OPENAI_MODEL,
                 "tools": TOOLS,
                 "tool_choice": "auto",
-                "messages": messages,
-                "temperature": 0.7,
-                "max_completion_tokens": OPENAI_MAX_TOKENS,
+                "input": pending_input,
+                "max_output_tokens": OPENAI_MAX_TOKENS,
             }
+            if previous_response_id:
+                payload["previous_response_id"] = previous_response_id
+            _apply_optional_temperature(payload)
 
-            async with session.post(OPENAI_URL, headers=headers, json=payload) as resp:
+            async with session.post(OPENAI_RESPONSES_URL, headers=headers, json=payload) as resp:
                 if resp.status != 200:
                     text = await resp.text()
                     return f"⚠️ AGENT command uplink returned HTTP {resp.status}:\n```{text[:1000]}```"
 
                 data = await resp.json()
-                choice = data["choices"][0]
-                msg = choice["message"]
-                finish_reason = choice.get("finish_reason")
-                tool_calls = msg.get("tool_calls") or []
+                previous_response_id = data.get("id") or previous_response_id
+                tool_calls = [item for item in data.get("output", []) if item.get("type") == "function_call"]
+
+                if tool_calls:
+                    pending_input = []
+                    for tc in tool_calls:
+                        fn_name = tc.get("name")
+                        raw_args = tc.get("arguments") or "{}"
+                        args = raw_args if isinstance(raw_args, dict) else json.loads(raw_args)
+                        if fn_name == "calculate":
+                            result = safe_calc(args.get("expression", ""))
+                        else:
+                            result = f"Unknown tool: {fn_name}"
+                        pending_input.append(
+                            {
+                                "type": "function_call_output",
+                                "call_id": tc.get("call_id"),
+                                "output": result,
+                            }
+                        )
+                    continue
 
                 if not tool_calls:
-                    content = (msg.get("content") or "").strip()
+                    content = extract_responses_text(data)
                     if content:
                         accumulated_parts.append(content)
-                    messages.append({"role": "assistant", "content": msg.get("content") or ""})
+                    incomplete_reason = ((data.get("incomplete_details") or {}).get("reason") or "").strip()
 
-                    if finish_reason == "length" and continuation_rounds < OPENAI_CONTINUE_MAX_ROUNDS:
+                    if incomplete_reason == "max_output_tokens" and continuation_rounds < OPENAI_CONTINUE_MAX_ROUNDS:
                         continuation_rounds += 1
-                        messages.append(
+                        pending_input = [
                             {
                                 "role": "user",
                                 "content": (
@@ -458,23 +496,11 @@ async def ask_openai(user_message: str, author_name: str, history: list | None =
                                     "Do not repeat prior text; finish the same response."
                                 ),
                             }
-                        )
+                        ]
                         continue
 
                     full_content = "\n\n".join(part for part in accumulated_parts if part).strip()
                     return full_content or "⚠️ Command telemetry incomplete. No response generated."
-
-                # Append assistant turn with tool calls, then resolve each one
-                messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls})
-                for tc in tool_calls:
-                    fn_name = tc["function"]["name"]
-                    raw_args = tc["function"]["arguments"]
-                    args = raw_args if isinstance(raw_args, dict) else json.loads(raw_args)
-                    if fn_name == "calculate":
-                        result = safe_calc(args.get("expression", ""))
-                    else:
-                        result = f"Unknown tool: {fn_name}"
-                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
     return "⚠️ Command telemetry incomplete. Tool resolution loop exhausted."
 
