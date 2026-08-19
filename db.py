@@ -3,7 +3,10 @@ import os
 from datetime import date, datetime
 from contextlib import contextmanager
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "metcom.db")
+DB_PATH = os.path.abspath(os.path.expanduser(os.getenv(
+    "METCOM_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "metcom.db"),
+)))
 
 # Maps user-facing keys to DB column names
 FIELD_MAP = {
