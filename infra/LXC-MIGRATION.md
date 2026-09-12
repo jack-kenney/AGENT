@@ -17,8 +17,9 @@ is stopped/disabled. Container autostart and the daily backup job are enabled.
 An isolated restore into temporary CT 114 passed integrity checks for both the
 database and recovery snapshot, with configuration and all nine content files
 present. The restore was never booted, its network was disabled, and CT 114 was
-removed after verification. The owner's Discord response/history check remains
-pending before VM 109's final shutdown.
+removed after verification. The owner confirmed the Discord response/history
+check passed. VM 109 shut down on September 12 at 21:41:54 UTC with autostart off;
+its disks are retained through at least September 26 at 21:41:54 UTC.
 
 ## Staging
 
