@@ -6,6 +6,20 @@ Use an unprivileged Debian 12 LXC with 1 CPU, 1 GiB RAM, 256 MiB swap, an 8 GiB
 hostname `metcom`, observed at `192.168.0.189`. Manage it through Proxmox; no
 public ingress or nested container runtime is required.
 
+Set `features: nesting=1` for the service's systemd mount namespaces. Without
+this, CT 113's AppArmor profile denies its private `/proc` mount and the service
+fails with `226/NAMESPACE`. The container remains unprivileged and the existing
+service sandbox is preserved; no nested container runtime is installed.
+
+On 2026-09-12 the protected final state was installed, SQLite integrity passed,
+and the bot connected from CT 113, including after a reboot. The old VM 109 bot
+is stopped/disabled. Container autostart and the daily backup job are enabled.
+An isolated restore into temporary CT 114 passed integrity checks for both the
+database and recovery snapshot, with configuration and all nine content files
+present. The restore was never booted, its network was disabled, and CT 114 was
+removed after verification. The owner's Discord response/history check remains
+pending before VM 109's final shutdown.
+
 ## Staging
 
 `prepare-lxc.sh` installs the source, pinned Python dependencies and the existing
