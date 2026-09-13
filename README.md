@@ -4,6 +4,18 @@ AGENT is the Advanced General Exogenic Nutrient Transformer: a Discord nutrition
 assistant backed by the OpenAI Responses API. It maintains profiles and food
 logs in SQLite and loads METCOM lore from `info/` at startup.
 
+## Content and development references
+
+`info/` contains Command lore and seven example SITREPs used for the bot's
+fictional military tone. The examples are historical writing references, not
+current user records or verified nutrition guidance. `DNA.png` is a reference
+illustration; the bot does not load it automatically.
+
+`spikes/openai_api_shape_spike.py` is a standalone, manually invoked diagnostic
+for model metadata and Chat Completions/Responses request shapes. It uses
+synthetic prompts and credentials from the environment or the working
+directory's ignored `.env`. It is not part of bot startup or automated tests.
+
 ## Local development
 
 Create a virtual environment, install `requirements.txt`, and provide a `.env`
